@@ -9,9 +9,9 @@ import * as bip39 from 'bip39';
 const config = {
     horizonUrl: 'https://api.mainnet.minepi.com',
     networkPassphrase: 'Pi Network',
-    baseFee: 100000,              // 0.01 PI
+    baseFee: 5000000,              // 0.5 PI
     maxFee: 1000000,              // 0.1 PI
-    feePriorityMultiplier: 2.0,   // multiply fee each retry
+    feePriorityMultiplier: 2.1,   // multiply fee each retry
     maxSubmissionAttempts: 5,
     floodCount: 3,                // duplicates per success
     floodInterval: 200,           // ms between floods
@@ -80,6 +80,7 @@ class PiSweeperBot {
                 // Refresh fee
                 await this.updateFeeStats();
                 const balances = await this.getAllBalances();
+                console.log(balances);
 
                 if (!balances.length) {
                     this.log('No claimable balances found. Waiting...');
@@ -99,8 +100,8 @@ class PiSweeperBot {
                             tx.sign(this.targetKP);
                             tx.sign(this.sponsorKP);
                             const res = await this.server.submitTransaction(tx);
-                            this.log(`Success (hash=${res.hash})`);
-
+                            if (res.title == "Transaction Failed") throw new Error(`${res.title} error: ${res.extras.result_codes.operations}`)
+                            this.log(`Success (hash=${res.title})`);
                             // Flood duplicates
                             for (let i = 0; i < config.floodCount; i++) {
                                 setTimeout(() => {
@@ -112,14 +113,12 @@ class PiSweeperBot {
                             break; // move to next balance
                         } catch (err) {
                             this.log(`Attempt ${attempt + 1} failed: ${err}`);
-                            attempt++;
                             // Bidding war: bump fee
-                            this.currentFee = Math.min(
-                                Math.ceil(this.currentFee * config.feePriorityMultiplier / 100) * 100,
-                                config.maxFee
-                            );
+                            this.currentFee = this.currentFee * config.feePriorityMultiplier;
                             this.log(`Bumping fee to ${this.currentFee}`);
                         }
+                        attempt++;
+
                     }
                 }
             } catch (e) {
@@ -130,17 +129,15 @@ class PiSweeperBot {
 
     async updateFeeStats() {
         const stats = await this.server.feeStats();
-        const p80 = parseInt(stats.fee_charged.p80, 10);
-        let fee = Math.max(p80 * config.feePriorityMultiplier, config.baseFee);
-        this.currentFee = Math.min(Math.ceil(fee / 100) * 100, config.maxFee);
+        const p99 = parseInt(stats.fee_charged.p99, 10);
+        let fee = Math.max(p99 * config.feePriorityMultiplier, config.baseFee);
+        this.currentFee = fee
         this.log(`Fee updated: ${this.currentFee} stroops`);
     }
 }
 
 (async () => {
-    const target = 'wash occur mistake outdoor output fun venue video symbol spell indoor piano cousin wasp coach region unit kingdom dune exile youth patrol frequent average';
-    const sponsor = 'text bulk sleep only cook congress battle inflict disease damage knock theme horn garage math lake soup powder metal razor carpet south cereal basket';
-    const dest = 'GAHQMFHVA7EKDD54L4HBX4QNCTGCLVTCP5DXKKFSTEBTQBNG6WDVGLCR';
+    
 
     const bot = new PiSweeperBot(target, dest, sponsor);
     await bot.start();
