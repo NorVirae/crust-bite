@@ -2,21 +2,20 @@
 // Claims all available claimable balances in a loop, engaging in bidding wars & network flooding until manually stopped.
 
 import * as ed25519 from 'ed25519-hd-key';
-import StellarSdk, { TimeoutInfinite } from 'stellar-sdk';
+import StellarSdk from 'stellar-sdk';
 import * as bip39 from 'bip39';
 
 // Configuration
 const config = {
     horizonUrl: 'https://api.mainnet.minepi.com',
     networkPassphrase: 'Pi Network',
-    baseFee: 5000000,              // 0.5 PI
+    baseFee: 1000000,              // 0.1 PI
     maxFee: 1000000,              // 0.1 PI
-    feePriorityMultiplier: 2.1,   // multiply fee each retry
+    feePriorityMultiplier: 2.0,   // multiply fee each retry
     maxSubmissionAttempts: 5,
     floodCount: 3,                // duplicates per success
     floodInterval: 200,           // ms between floods
     debug: true,
-    timeboundGrace: 60,
 };
 
 class PiSweeperBot {
@@ -29,7 +28,7 @@ class PiSweeperBot {
         this.currentFee = config.baseFee;
         // URL for manual inspection
         this.claimableUrl = `${config.horizonUrl}/claimable_balances?claimant=${this.targetKP.publicKey()}`;
-        this.log(`Initialized. Check balances: ${this.claimableUrl} Target: ${this.targetKP.publicKey()}`);
+        this.log(`Initialized. Check balances: ${this.claimableUrl}`);
     }
 
     log(msg) {
@@ -50,74 +49,28 @@ class PiSweeperBot {
             .claimant(this.targetKP.publicKey())
             .limit(100)
             .call();
-        console.log(resp, "HOLLA")
         return resp.records;
     }
 
-    pauseUntil2SecondsBefore(targetTimestamp) {
-        const now = Date.now(); // in milliseconds
-        const targetTimeMs = targetTimestamp * 1000; // convert to ms
-        const pauseDuration = targetTimeMs - now - 2000; // 2 seconds before
-    
-        if (pauseDuration <= 0) {
-            return Promise.resolve(); // No need to wait
-        }
-    
-        return new Promise(resolve => setTimeout(resolve, pauseDuration));
-    }
-    
-
-    extractMinTime(balance) {
-        // 'not.abs_before' means claimable after this time
-        const claimant = balance.claimants.find(c => c.destination === this.targetKP.publicKey());
-        if (claimant && claimant.predicate) {
-            if (claimant.predicate.abs_after) {
-                console.log(claimant.predicate.abs_after, " CHEKC")
-                return parseInt(claimant.predicate.abs_after, 10);
-            }
-            if (claimant.predicate.not && claimant.predicate.not.abs_before_epoch) {
-                console.log(claimant.predicate.not.abs_before_epoch, " CHEKC TIME")
-
-                return parseInt(claimant.predicate.not.abs_before_epoch, 10);
-            }
-        }
-        return 0;
-    }
-
     // Build and sign transaction for a given balance
-    async buildTxForBalance(balanceId, amount, balance) {
-        const unlockTime = this.extractMinTime(balance);
-        
-        // Use Math.floor to ensure integer timestamp
-        const lowerBound = Math.floor((Date.now() + 2000) / 1000);
-        const upperBound = Math.floor(unlockTime + config.timeboundGrace);
-        
-        // Validate time bounds
-        if (lowerBound >= upperBound) {
-            throw new Error(`Invalid time bounds: lowerBound (${lowerBound}) must be less than upperBound (${upperBound})`);
-        }
-        
-        // Load sponsor account
+    async buildTxForBalance(balanceId, amount) {
         const sponsorAcc = await this.server.loadAccount(this.sponsorKP.publicKey());
-        
-        // Build and return the transaction
         return new StellarSdk.TransactionBuilder(sponsorAcc, {
             fee: String(this.currentFee),
             networkPassphrase: this.network,
         })
-        .addOperation(StellarSdk.Operation.claimClaimableBalance({
-            balanceId,
-            source: this.targetKP.publicKey(),
-        }))
-        .addOperation(StellarSdk.Operation.payment({
-            destination: this.dest,
-            asset: StellarSdk.Asset.native(),
-            amount: String(amount), // Ensure amount is a string
-            source: this.targetKP.publicKey(),
-        }))
-        .setTimebounds(lowerBound, upperBound)
-        // .setTimeout(300) // Add explicit timeout (5 minutes)
-        .build();
+            .addOperation(StellarSdk.Operation.claimClaimableBalance({
+                balanceId,
+                source: this.targetKP.publicKey(),
+            }))
+            .addOperation(StellarSdk.Operation.payment({
+                destination: this.dest,
+                asset: StellarSdk.Asset.native(),
+                amount: amount,
+                source: this.targetKP.publicKey(),
+            }))
+            .setTimeout(300)
+            .build();
     }
 
     // Main loop: claim each balance continuously
@@ -142,17 +95,12 @@ class PiSweeperBot {
                     let attempt = 0;
                     while (attempt < config.maxSubmissionAttempts) {
                         try {
-                            // await this.pauseUntil2SecondsBefore(this.extractMinTime(bal))
-                            // await this.pauseUntil2SecondsBefore(Date.now() + 2000)
-
-                            const tx = await this.buildTxForBalance(id, amt, bal);
+                            const tx = await this.buildTxForBalance(id, amt);
                             tx.sign(this.targetKP);
                             tx.sign(this.sponsorKP);
                             const res = await this.server.submitTransaction(tx);
-                            this.log(`Success (hash=${JSON.stringify(res)})`);
+                            this.log(`Success (hash=${res.hash})`);
 
-                            if (res.title == "Transaction Failed") throw new Error(`${res.title} error: ${res.extras.result_codes}`)
-                            this.log(`Success (hash=${res})`);
                             // Flood duplicates
                             for (let i = 0; i < config.floodCount; i++) {
                                 setTimeout(() => {
@@ -163,13 +111,15 @@ class PiSweeperBot {
                             }
                             break; // move to next balance
                         } catch (err) {
-                            this.log(`Attempt ${attempt + 1} failed: ${JSON.stringify(err)}`);
+                            this.log(`Attempt ${attempt + 1} failed: ${err}`);
+                            attempt++;
                             // Bidding war: bump fee
-                            this.currentFee = this.currentFee * config.feePriorityMultiplier;
+                            this.currentFee = Math.min(
+                                Math.ceil(this.currentFee * config.feePriorityMultiplier / 100) * 100,
+                                config.maxFee
+                            );
                             this.log(`Bumping fee to ${this.currentFee}`);
                         }
-                        attempt++;
-
                     }
                 }
             } catch (e) {
@@ -180,18 +130,18 @@ class PiSweeperBot {
 
     async updateFeeStats() {
         const stats = await this.server.feeStats();
-        const p99 = parseInt(stats.fee_charged.p99, 10);
-        let fee = Math.max(p99 * config.feePriorityMultiplier, config.baseFee);
-        this.currentFee = fee
+        const p80 = parseInt(stats.fee_charged.p80, 10);
+        let fee = Math.max(p80 * config.feePriorityMultiplier, config.baseFee);
+        this.currentFee = Math.min(Math.ceil(fee / 100) * 100, config.maxFee);
         this.log(`Fee updated: ${this.currentFee} stroops`);
     }
 }
 
 (async () => {
-
-    const target = 'embrace gloom critic jaguar echo concert execute dawn shed myth bread random orient hedgehog pond corn eye raccoon energy situate indicate resist pool sad';
-    const sponsor = 'cute increase lab raw blade lawsuit soon congress title flat brown smoke hair hard property copper limit regular process remember use safe yellow quantum';
+    const target = 'album soda three sad ozone arm swing blush unable shock smile husband matrix harsh column thunder clerk include easily relax humor female copper enlist';
+    const sponsor = 'text bulk sleep only cook congress battle inflict disease damage knock theme horn garage math lake soup powder metal razor carpet south cereal basket';
     const dest = 'GAHQMFHVA7EKDD54L4HBX4QNCTGCLVTCP5DXKKFSTEBTQBNG6WDVGLCR';
+
     const bot = new PiSweeperBot(target, dest, sponsor);
     await bot.start();
 })();
